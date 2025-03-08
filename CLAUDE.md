@@ -3,7 +3,6 @@
 ## Build/Test Commands
 - Run the application: `python main.py`
 - Run with custom options: `python main.py --output-dir ./my_archive --max-workers 3`
-- Test simple hello: `python hello.py`
 - Type check: `python -m mypy main.py` (requires mypy installation)
 - Lint: `python -m ruff check main.py` (requires ruff installation)
 

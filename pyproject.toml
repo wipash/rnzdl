@@ -1,11 +1,38 @@
 [project]
 name = "rnzdl"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "RNZ Audiobook Archiver: Downloads and organizes audiobooks from RNZ Storytime"
 readme = "README.md"
 requires-python = ">=3.13"
+license = {text = "MIT"}
+
 dependencies = [
     "mutagen>=1.47.0",
     "pillow>=11.1.0",
     "requests>=2.32.3",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.9.0",
+    "ruff>=0.3.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+rnzdl = "rnzdl.main:main"
+
+[tool.ruff]
+line-length = 130
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

@@ -6,25 +6,27 @@ A web archiver to download and organize audiobooks from RNZ Storytime.
 It downloads MP3s and images, organizes them by reading age, and enriches the MP3 metadata.
 """
 
-import sys
-import json
-import time
-import signal
 import argparse
-import requests
-import threading
-import re
-import io
-from pathlib import Path
-from urllib.parse import urlparse
 import concurrent.futures
+import io
+import json
 import logging
+import re
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
 from typing import Dict, Optional, Set, Tuple, Union
+from urllib.parse import urlparse
+
+import requests
 
 # For MP3 metadata manipulation
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, COMM, TCON, TRCK
+from mutagen.id3 import APIC, COMM, ID3, TALB, TCON, TIT2, TPE1, TRCK
 from mutagen.id3._util import ID3NoHeaderError
 from PIL import Image
+
 
 def setup_logging() -> logging.Logger:
     """Set up and configure logging for the application.
