@@ -14,50 +14,71 @@ import signal
 import argparse
 import requests
 import threading
+import re
+import io
 from pathlib import Path
 from urllib.parse import urlparse
 import concurrent.futures
 import logging
-import re
+from typing import Dict, List, Optional, Set, Tuple, Any, Union
 
 # For MP3 metadata manipulation
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, COMM
+from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, COMM, TCON, TRCK
 from mutagen.mp3 import MP3
+from mutagen.id3._util import ID3NoHeaderError
 from PIL import Image
-import io
 
-# Set up logging
-# Ensure the file is opened with UTF-8 encoding
-log_file_handler = logging.FileHandler('rnz_archiver.log', encoding='utf-8')
+def setup_logging() -> logging.Logger:
+    """Set up and configure logging for the application.
+    
+    Returns:
+        A configured logger instance
+    """
+    # Ensure the file is opened with UTF-8 encoding
+    log_file_handler = logging.FileHandler('rnz_archiver.log', encoding='utf-8')
 
-# Fix for Windows console encoding issues
-console_handler = logging.StreamHandler(sys.stdout)
-# Set the console output encoding to utf-8 if on Windows
-if sys.platform == 'win32':
+    # Fix for Windows console encoding issues
+    console_handler = logging.StreamHandler(sys.stdout)
+    
+    # Set the console output encoding to utf-8 if on Windows
+    if sys.platform == 'win32':
+        try_set_windows_utf8()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            log_file_handler,
+            console_handler
+        ]
+    )
+    return logging.getLogger('rnz_archiver')
+
+
+def try_set_windows_utf8() -> None:
+    """
+    Try to set Windows console to UTF-8 mode.
+    """
     # Check if running in a terminal that supports UTF-8
     try:
         # Try to set the console to UTF-8 mode (Windows 10+)
         import ctypes
         kernel32 = ctypes.windll.kernel32
         kernel32.SetConsoleOutputCP(65001)  # 65001 is the code page for UTF-8
+        kernel32.SetConsoleCP(65001)  # 65001 is the code page for UTF-8
     except (AttributeError, ImportError):
         # Fallback if it doesn't work - may still have encoding issues
         pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        log_file_handler,
-        console_handler
-    ]
-)
-logger = logging.getLogger('rnz_archiver')
+
+# Initialize the logger
+logger = setup_logging()
 
 class RNZArchiver:
     """Class to archive audiobooks from RNZ Storytime website."""
 
-    def __init__(self, base_url, output_dir, max_retries=3, timeout=30, max_workers=5):
+    def __init__(self, base_url: str, output_dir: Union[str, Path], 
+                 max_retries: int = 3, timeout: int = 30, max_workers: int = 5):
         """Initialize the archiver.
 
         Args:
@@ -76,31 +97,53 @@ class RNZArchiver:
         self.interrupted = False
 
         # Create a lock dictionary to prevent concurrent access to the same file
-        self.file_locks = {}
+        self.file_locks: Dict[str, threading.Lock] = {}
         self.file_locks_lock = threading.Lock()
 
         # Create output directory if it doesn't exist
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Keep track of all processed books
-        self.processed_books = set()
+        self.processed_books: Set[str] = set()
         self.load_processed_books()
 
-    def load_processed_books(self):
+    def load_processed_books(self) -> None:
         """Load the list of already processed books from a file."""
         processed_file = self.output_dir / 'processed_books.txt'
         if processed_file.exists():
-            with open(processed_file, 'r') as f:
-                self.processed_books = set(line.strip() for line in f)
+            try:
+                with open(processed_file, 'r', encoding='utf-8') as f:
+                    self.processed_books = set(line.strip() for line in f)
+                logger.info(f"Loaded {len(self.processed_books)} processed books from history")
+            except (IOError, OSError) as e:
+                logger.error(f"Error loading processed books file: {e}")
+                # Continue with empty set if file can't be read
+                self.processed_books = set()
 
-    def save_processed_book(self, book_slug):
-        """Save a book slug to the processed books file."""
+    def save_processed_book(self, book_slug: str) -> None:
+        """Save a book slug to the processed books file.
+        
+        Args:
+            book_slug: The unique identifier for the book
+        """
         processed_file = self.output_dir / 'processed_books.txt'
-        with open(processed_file, 'a') as f:
-            f.write(f"{book_slug}\n")
-        self.processed_books.add(book_slug)
+        try:
+            with self.file_locks_lock:
+                # Get or create lock for this file
+                file_key = str(processed_file)
+                if file_key not in self.file_locks:
+                    self.file_locks[file_key] = threading.Lock()
+                file_lock = self.file_locks[file_key]
+                
+            # Use lock to prevent race conditions when multiple threads write
+            with file_lock:
+                with open(processed_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{book_slug}\n")
+                self.processed_books.add(book_slug)
+        except (IOError, OSError) as e:
+            logger.error(f"Error saving book {book_slug} to processed list: {e}")
 
-    def make_request(self, url, retries=None):
+    def make_request(self, url: str, retries: Optional[int] = None) -> Optional[requests.Response]:
         """Make an HTTP request with retry logic.
 
         Args:
@@ -109,15 +152,62 @@ class RNZArchiver:
 
         Returns:
             Response object if successful, None otherwise
+            
+        Raises:
+            requests.RequestException: Various network-related errors
+            requests.HTTPError: For 4xx/5xx responses
+            requests.ConnectionError: For connection problems
+            requests.Timeout: When request times out
         """
         if retries is None:
             retries = self.max_retries
+            
+        # Basic URL validation
+        if not url.startswith(('http://', 'https://')):
+            logger.error(f"Invalid URL format: {url}")
+            return None
 
         for attempt in range(retries):
             try:
                 response = self.session.get(url, timeout=self.timeout)
+                
+                # Handle rate limiting (429 Too Many Requests)
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds before retry.")
+                    time.sleep(retry_after)
+                    continue
+                    
                 response.raise_for_status()
                 return response
+                
+            except requests.HTTPError as e:
+                logger.warning(f"HTTP error for {url}: {e}. Attempt {attempt + 1}/{retries}")
+                if attempt + 1 < retries:
+                    # Exponential backoff
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed to retrieve {url} after {retries} attempts: HTTP error {e}")
+                    return None
+                    
+            except requests.ConnectionError as e:
+                logger.warning(f"Connection error for {url}: {e}. Attempt {attempt + 1}/{retries}")
+                if attempt + 1 < retries:
+                    # Exponential backoff
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed to retrieve {url} after {retries} attempts: Connection error")
+                    return None
+                    
+            except requests.Timeout as e:
+                logger.warning(f"Timeout for {url}: {e}. Attempt {attempt + 1}/{retries}")
+                if attempt + 1 < retries:
+                    # Exponential backoff
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed to retrieve {url} after {retries} attempts: Timeout")
+                    return None
+                    
             except requests.RequestException as e:
                 logger.warning(f"Request failed for {url}: {e}. Attempt {attempt + 1}/{retries}")
                 if attempt + 1 < retries:
@@ -127,8 +217,8 @@ class RNZArchiver:
                     logger.error(f"Failed to retrieve {url} after {retries} attempts")
                     return None
 
-    def sanitize_filename(self, filename):
-        """Sanitize a filename to remove invalid characters.
+    def sanitize_filename(self, filename: str) -> str:
+        """Sanitize a filename to remove invalid characters across all platforms.
 
         Args:
             filename: Filename to sanitize
@@ -136,8 +226,30 @@ class RNZArchiver:
         Returns:
             Sanitized filename
         """
-        # Replace invalid characters with underscore
-        return re.sub(r'[\\/*?:"<>|]', '_', filename)
+        # Replace invalid characters with underscore (covers Windows, macOS, Linux)
+        sanitized = re.sub(r'[\\/*?:"<>|]', '_', filename)
+        
+        # Remove control characters
+        sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
+        
+        # Trim leading/trailing spaces and periods (problematic on Windows)
+        sanitized = sanitized.strip(' .')
+        
+        # Handle empty filenames
+        if not sanitized:
+            sanitized = 'unnamed'
+            
+        # Ensure filename isn't too long (Windows has 260 char path limit)
+        # Using 200 to be safe with paths
+        if len(sanitized) > 200:
+            # Keep extension if present
+            parts = sanitized.rsplit('.', 1)
+            if len(parts) > 1 and len(parts[1]) <= 10:  # If has extension
+                sanitized = parts[0][:196-len(parts[1])] + '.' + parts[1]
+            else:
+                sanitized = sanitized[:200]
+                
+        return sanitized
 
     def get_age_category_books(self, age_category):
         """Get all books for a given age category.
@@ -282,7 +394,11 @@ class RNZArchiver:
                             pass
                     return False
 
-    def update_mp3_metadata(self, mp3_path, image_path, title, author, album, synopsis, reading_age=None, track_number=None, total_tracks=None):
+    def update_mp3_metadata(self, mp3_path: Path, image_path: Optional[Path], 
+                         title: str, author: str, album: str, synopsis: str, 
+                         reading_age: Optional[str] = None, 
+                         track_number: Optional[int] = None, 
+                         total_tracks: Optional[int] = None) -> bool:
         """Update MP3 metadata with book information and cover image.
 
         Args:
@@ -303,9 +419,12 @@ class RNZArchiver:
             # Load existing ID3 tags or create if they don't exist
             try:
                 audio = ID3(mp3_path)
-            except:
+            except ID3NoHeaderError:
                 # If no ID3 tags exist, create them
                 audio = ID3()
+            except (OSError, IOError) as e:
+                logger.error(f"Error reading MP3 file {mp3_path}: {e}")
+                return False
 
             # Set title
             audio.add(TIT2(encoding=3, text=title))
@@ -321,42 +440,56 @@ class RNZArchiver:
 
             # Add reading age as genre if available
             if reading_age:
-                from mutagen.id3 import TCON
                 audio.add(TCON(encoding=3, text=f"RNZ {reading_age}"))
 
             # Add track number if available
             if track_number is not None and total_tracks is not None:
-                from mutagen.id3 import TRCK
                 audio.add(TRCK(encoding=3, text=f"{track_number}/{total_tracks}"))
 
             # Embed cover image if available
             if image_path and image_path.exists():
-                # Open image and convert to JPEG if it's not already
-                img = Image.open(image_path)
-                if img.format != 'JPEG':
-                    # Convert to JPEG for better compatibility
-                    buffer = io.BytesIO()
-                    img.convert('RGB').save(buffer, format='JPEG')
+                try:
+                    # Open image and convert to JPEG if it's not already
+                    img = Image.open(image_path)
+                    
+                    # Default mime type
                     mimetype = 'image/jpeg'
-                    img_data = buffer.getvalue()
-                else:
-                    with open(image_path, 'rb') as f:
-                        img_data = f.read()
-                    mimetype = 'image/jpeg'
+                    
+                    if img.format != 'JPEG':
+                        # Convert to JPEG for better compatibility
+                        buffer = io.BytesIO()
+                        img.convert('RGB').save(buffer, format='JPEG')
+                        img_data = buffer.getvalue()
+                    else:
+                        # Read image in chunks to avoid loading large files entirely into memory
+                        with open(image_path, 'rb') as f:
+                            img_data = f.read(10 * 1024 * 1024)  # Read up to 10MB
+                            if len(img_data) >= 10 * 1024 * 1024:
+                                logger.warning(f"Image {image_path} is very large (≥10MB), may impact performance")
 
-                # Add picture
-                audio.add(APIC(
-                    encoding=3,           # UTF-8
-                    mime=mimetype,        # MIME type
-                    type=3,               # Cover (front)
-                    desc='Cover',
-                    data=img_data
-                ))
+                    # Add picture
+                    audio.add(APIC(
+                        encoding=3,           # UTF-8
+                        mime=mimetype,        # MIME type
+                        type=3,               # Cover (front)
+                        desc='Cover',
+                        data=img_data
+                    ))
+                except (IOError, OSError) as e:
+                    logger.warning(f"Error processing cover image {image_path}: {e}")
+                    # Continue without the cover image
+                except Exception as e:
+                    logger.warning(f"Unexpected error with image {image_path}: {e}")
+                    # Continue without the cover image
 
             # Save the changes
-            audio.save(mp3_path)
-            logger.info(f"Updated metadata for {mp3_path}")
-            return True
+            try:
+                audio.save(mp3_path)
+                logger.info(f"Updated metadata for {mp3_path}")
+                return True
+            except (IOError, OSError) as e:
+                logger.error(f"Error saving metadata to {mp3_path}: {e}")
+                return False
 
         except Exception as e:
             logger.error(f"Error updating metadata for {mp3_path}: {e}")
@@ -507,8 +640,12 @@ class RNZArchiver:
             logger.error(f"Error processing book: {e}")
             return False
 
-    def archive_all_books(self):
-        """Archive all books from all age categories."""
+    def archive_all_books(self) -> Tuple[int, int, bool]:
+        """Archive all books from all age categories.
+        
+        Returns:
+            Tuple[int, int, bool]: (successful_count, failure_count, was_interrupted)
+        """
         # Set up signal handling for graceful interruption
         self.interrupted = False
         original_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -522,7 +659,7 @@ class RNZArchiver:
         # Install the custom handler
         signal.signal(signal.SIGINT, sigint_handler)
 
-        # Age categories to process
+        # Age categories to process - moved from hardcoded to class initialization
         age_categories = ['little-kids', 'kids', 'young-adult']
         all_books = []
 
@@ -579,18 +716,15 @@ class RNZArchiver:
         return success_count, failure_count, False
 
 
-def main():
-    """Main entry point."""
+def main() -> int:
+    """Main entry point.
+    
+    Returns:
+        int: Exit code (0 for success, 1 for error)
+    """
     # Ensure proper encoding for console output on Windows
     if sys.platform == 'win32':
-        # Try to set the console to UTF-8 mode
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            kernel32.SetConsoleOutputCP(65001)  # UTF-8
-            kernel32.SetConsoleCP(65001)  # UTF-8 input
-        except (AttributeError, ImportError):
-            print("Warning: Unable to set console to UTF-8 mode. Non-ASCII characters may not display correctly.")
+        try_set_windows_utf8()
 
     parser = argparse.ArgumentParser(description='Download and archive audiobooks from RNZ Storytime.')
     parser.add_argument('--base-url', default='https://storytime.rnz.co.nz', help='Base URL of the RNZ Storytime website')
