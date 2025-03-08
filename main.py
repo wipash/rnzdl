@@ -6,7 +6,6 @@ A web archiver to download and organize audiobooks from RNZ Storytime.
 It downloads MP3s and images, organizes them by reading age, and enriches the MP3 metadata.
 """
 
-import os
 import sys
 import json
 import time
@@ -20,17 +19,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 import concurrent.futures
 import logging
-from typing import Dict, List, Optional, Set, Tuple, Any, Union
+from typing import Dict, Optional, Set, Tuple, Union
 
 # For MP3 metadata manipulation
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, COMM, TCON, TRCK
-from mutagen.mp3 import MP3
 from mutagen.id3._util import ID3NoHeaderError
 from PIL import Image
 
 def setup_logging() -> logging.Logger:
     """Set up and configure logging for the application.
-    
+
     Returns:
         A configured logger instance
     """
@@ -39,7 +37,7 @@ def setup_logging() -> logging.Logger:
 
     # Fix for Windows console encoding issues
     console_handler = logging.StreamHandler(sys.stdout)
-    
+
     # Set the console output encoding to utf-8 if on Windows
     if sys.platform == 'win32':
         try_set_windows_utf8()
@@ -77,7 +75,7 @@ logger = setup_logging()
 class RNZArchiver:
     """Class to archive audiobooks from RNZ Storytime website."""
 
-    def __init__(self, base_url: str, output_dir: Union[str, Path], 
+    def __init__(self, base_url: str, output_dir: Union[str, Path],
                  max_retries: int = 3, timeout: int = 30, max_workers: int = 5):
         """Initialize the archiver.
 
@@ -122,7 +120,7 @@ class RNZArchiver:
 
     def save_processed_book(self, book_slug: str) -> None:
         """Save a book slug to the processed books file.
-        
+
         Args:
             book_slug: The unique identifier for the book
         """
@@ -134,7 +132,7 @@ class RNZArchiver:
                 if file_key not in self.file_locks:
                     self.file_locks[file_key] = threading.Lock()
                 file_lock = self.file_locks[file_key]
-                
+
             # Use lock to prevent race conditions when multiple threads write
             with file_lock:
                 with open(processed_file, 'a', encoding='utf-8') as f:
@@ -152,7 +150,7 @@ class RNZArchiver:
 
         Returns:
             Response object if successful, None otherwise
-            
+
         Raises:
             requests.RequestException: Various network-related errors
             requests.HTTPError: For 4xx/5xx responses
@@ -161,7 +159,7 @@ class RNZArchiver:
         """
         if retries is None:
             retries = self.max_retries
-            
+
         # Basic URL validation
         if not url.startswith(('http://', 'https://')):
             logger.error(f"Invalid URL format: {url}")
@@ -170,17 +168,17 @@ class RNZArchiver:
         for attempt in range(retries):
             try:
                 response = self.session.get(url, timeout=self.timeout)
-                
+
                 # Handle rate limiting (429 Too Many Requests)
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('Retry-After', 5))
                     logger.warning(f"Rate limited. Waiting {retry_after} seconds before retry.")
                     time.sleep(retry_after)
                     continue
-                    
+
                 response.raise_for_status()
                 return response
-                
+
             except requests.HTTPError as e:
                 logger.warning(f"HTTP error for {url}: {e}. Attempt {attempt + 1}/{retries}")
                 if attempt + 1 < retries:
@@ -189,7 +187,7 @@ class RNZArchiver:
                 else:
                     logger.error(f"Failed to retrieve {url} after {retries} attempts: HTTP error {e}")
                     return None
-                    
+
             except requests.ConnectionError as e:
                 logger.warning(f"Connection error for {url}: {e}. Attempt {attempt + 1}/{retries}")
                 if attempt + 1 < retries:
@@ -198,7 +196,7 @@ class RNZArchiver:
                 else:
                     logger.error(f"Failed to retrieve {url} after {retries} attempts: Connection error")
                     return None
-                    
+
             except requests.Timeout as e:
                 logger.warning(f"Timeout for {url}: {e}. Attempt {attempt + 1}/{retries}")
                 if attempt + 1 < retries:
@@ -207,7 +205,7 @@ class RNZArchiver:
                 else:
                     logger.error(f"Failed to retrieve {url} after {retries} attempts: Timeout")
                     return None
-                    
+
             except requests.RequestException as e:
                 logger.warning(f"Request failed for {url}: {e}. Attempt {attempt + 1}/{retries}")
                 if attempt + 1 < retries:
@@ -228,17 +226,17 @@ class RNZArchiver:
         """
         # Replace invalid characters with underscore (covers Windows, macOS, Linux)
         sanitized = re.sub(r'[\\/*?:"<>|]', '_', filename)
-        
+
         # Remove control characters
         sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
-        
+
         # Trim leading/trailing spaces and periods (problematic on Windows)
         sanitized = sanitized.strip(' .')
-        
+
         # Handle empty filenames
         if not sanitized:
             sanitized = 'unnamed'
-            
+
         # Ensure filename isn't too long (Windows has 260 char path limit)
         # Using 200 to be safe with paths
         if len(sanitized) > 200:
@@ -248,7 +246,7 @@ class RNZArchiver:
                 sanitized = parts[0][:196-len(parts[1])] + '.' + parts[1]
             else:
                 sanitized = sanitized[:200]
-                
+
         return sanitized
 
     def get_age_category_books(self, age_category):
@@ -394,10 +392,10 @@ class RNZArchiver:
                             pass
                     return False
 
-    def update_mp3_metadata(self, mp3_path: Path, image_path: Optional[Path], 
-                         title: str, author: str, album: str, synopsis: str, 
-                         reading_age: Optional[str] = None, 
-                         track_number: Optional[int] = None, 
+    def update_mp3_metadata(self, mp3_path: Path, image_path: Optional[Path],
+                         title: str, author: str, album: str, synopsis: str,
+                         reading_age: Optional[str] = None,
+                         track_number: Optional[int] = None,
                          total_tracks: Optional[int] = None) -> bool:
         """Update MP3 metadata with book information and cover image.
 
@@ -451,10 +449,10 @@ class RNZArchiver:
                 try:
                     # Open image and convert to JPEG if it's not already
                     img = Image.open(image_path)
-                    
+
                     # Default mime type
                     mimetype = 'image/jpeg'
-                    
+
                     if img.format != 'JPEG':
                         # Convert to JPEG for better compatibility
                         buffer = io.BytesIO()
@@ -642,7 +640,7 @@ class RNZArchiver:
 
     def archive_all_books(self) -> Tuple[int, int, bool]:
         """Archive all books from all age categories.
-        
+
         Returns:
             Tuple[int, int, bool]: (successful_count, failure_count, was_interrupted)
         """
@@ -718,7 +716,7 @@ class RNZArchiver:
 
 def main() -> int:
     """Main entry point.
-    
+
     Returns:
         int: Exit code (0 for success, 1 for error)
     """
