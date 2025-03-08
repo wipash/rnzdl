@@ -2,7 +2,6 @@
 
 A Python tool that archives audiobooks from Radio New Zealand's Storytime website, preserving them with full metadata.
 
-![RNZ Storytime](https://storytime.rnz.co.nz/static/storytimeDesktop-b969af44f15aab4328ec50ece4bfb0a3.jpg)
 
 ## Features
 
